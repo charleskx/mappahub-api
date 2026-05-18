@@ -7,6 +7,7 @@ import { subscriptions } from '../../db/schema'
 import { geocodingQueue } from '../../queues/geocoding.queue'
 import type { ImportJobPayload } from '../../queues/import.queue'
 import { importDoneHtml, sendMail } from '../../shared/mailer'
+import { emitToTenant } from '../../shared/sse-bus'
 import { partnerRepository } from '../partner/partner.repository'
 import { pinTypeRepository } from '../pin-type/pin-type.repository'
 import { userRepository } from '../user/user.repository'
@@ -30,7 +31,7 @@ async function buildPinTypeCache(tenantId: string): Promise<Map<string, string>>
 }
 
 export function createImportWorker() {
-  return new Worker<ImportJobPayload>(
+  const worker = new Worker<ImportJobPayload>(
     'import',
     async job => {
       const { jobId, tenantId, rows, mode } = job.data
@@ -132,12 +133,26 @@ export function createImportWorker() {
 
       // Send email notifications to uploader + owner
       await sendImportDoneEmails({ jobId, tenantId, created, updated, removed, failed, totalRows: rows.length })
+
+      // Push SSE notification to connected clients
+      emitToTenant(tenantId, { type: 'notification' })
     },
     {
       connection: redis,
       concurrency: 2,
     },
   )
+
+  worker.on('failed', async (job: { data: ImportJobPayload } | undefined) => {
+    if (!job) return
+    const { jobId, tenantId } = job.data
+    try {
+      await importRepository.update(jobId, { status: 'failed', finishedAt: new Date() })
+    } catch {}
+    emitToTenant(tenantId, { type: 'notification' })
+  })
+
+  return worker
 }
 
 async function sendImportDoneEmails(opts: {

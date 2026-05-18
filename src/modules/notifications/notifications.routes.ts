@@ -8,19 +8,10 @@ export async function notificationsRoutes(app: FastifyInstance) {
     return notificationsService.list(req.tenantId, req.userRole)
   })
 
-  app.get('/events', async (req, reply) => {
-    const { token } = req.query as { token?: string }
-    if (!token) {
-      return reply.status(401).send({ error: 'Token obrigatório' })
-    }
-
-    let tenantId: string
-    try {
-      const payload = app.jwt.verify<{ tenantId: string }>(token)
-      tenantId = payload.tenantId
-    } catch {
-      return reply.status(401).send({ error: 'Token inválido' })
-    }
+  // SSE — real-time push for notifications and geocoding updates.
+  // Auth via Authorization header (handled by authenticate middleware) — no token in URL.
+  app.get('/events', { preHandler: [authenticate] }, async (req, reply) => {
+    const tenantId = req.tenantId
 
     reply.raw.setHeader('Content-Type', 'text/event-stream')
     reply.raw.setHeader('Cache-Control', 'no-cache')
@@ -34,7 +25,6 @@ export async function notificationsRoutes(app: FastifyInstance) {
       } catch {}
     }
 
-    // Initial heartbeat so client knows the connection is live
     reply.raw.write(': connected\n\n')
 
     const heartbeat = setInterval(() => {
