@@ -29,6 +29,13 @@
       "when": 1778783377557,
       "tag": "0003_remove_plantype_default",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779233240128,
+      "tag": "0004_plain_zarda",
+      "breakpoints": true
     }
   ]
 }
