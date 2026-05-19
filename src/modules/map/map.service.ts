@@ -134,7 +134,14 @@ export const mapService = {
   },
 
   async getPublicConfig(token: string) {
-    await this._resolvePublicMap(token)
-    return {}
+    const map = await this._resolvePublicMap(token)
+    const settings = await tenantRepository.findSettings(map.tenantId)
+    return {
+      brandLogoUrl: settings?.brandLogoUrl ?? null,
+      brandName: settings?.brandName ?? null,
+      brandWebsiteUrl: settings?.brandWebsiteUrl ?? null,
+      brandColor: settings?.brandColor ?? null,
+      brandFooterText: settings?.brandFooterText ?? null,
+    }
   },
 }

@@ -26,4 +26,13 @@ export async function tenantRoutes(app: FastifyInstance) {
       tenantId: req.tenantId,
     })
   })
+
+  app.post('/upload/logo', { preHandler }, async (req, reply) => {
+    const url = await tenantService.uploadLogo(req, {
+      id: req.userId,
+      role: req.userRole,
+      tenantId: req.tenantId,
+    })
+    return reply.status(201).send({ url })
+  })
 }

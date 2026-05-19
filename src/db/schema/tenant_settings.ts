@@ -20,5 +20,10 @@ export const tenantSettings = pgTable('tenant_settings', {
   defaultMapLng: doublePrecision('default_map_lng'),
   publicMapEnabled: boolean('public_map_enabled').default(true),
   publicMapToken: varchar('public_map_token', { length: 100 }),
+  brandLogoUrl: varchar('brand_logo_url', { length: 500 }),
+  brandName: varchar('brand_name', { length: 200 }),
+  brandWebsiteUrl: varchar('brand_website_url', { length: 500 }),
+  brandColor: varchar('brand_color', { length: 7 }),
+  brandFooterText: varchar('brand_footer_text', { length: 300 }),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 })
