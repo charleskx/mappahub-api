@@ -20,8 +20,7 @@ export async function sendMail(options: MailOptions): Promise<void> {
   if (env.NODE_ENV !== 'production') {
     console.log('\n📧 [MAILER DEV]')
     console.log(`  To: ${options.to}`)
-    console.log(`  Subject: ${options.subject}`)
-    console.log(`  Body: ${options.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)}\n`)
+    console.log(`  Subject: ${options.subject}\n`)
     return
   }
 

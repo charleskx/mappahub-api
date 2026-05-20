@@ -1,3 +1,4 @@
+import { readFile, unlink } from 'node:fs/promises'
 import { Worker } from 'bullmq'
 import { eq } from 'drizzle-orm'
 import { redis } from '../../config/redis'
@@ -12,6 +13,7 @@ import { partnerRepository } from '../partner/partner.repository'
 import { pinTypeRepository } from '../pin-type/pin-type.repository'
 import { userRepository } from '../user/user.repository'
 import { importRepository } from './import.repository'
+import { parseSpreadsheet } from './import.parser'
 
 async function getGeocodingPriority(tenantId: string): Promise<number> {
   const [sub] = await db
@@ -24,17 +26,33 @@ async function getGeocodingPriority(tenantId: string): Promise<number> {
 
 const PROGRESS_BATCH = 10
 
-// Cache de nome → id por tenant para evitar consultas repetidas por linha
 async function buildPinTypeCache(tenantId: string): Promise<Map<string, string>> {
   const all = await pinTypeRepository.findAll(tenantId)
   return new Map(all.map(pt => [pt.name.toLowerCase(), pt.id]))
+}
+
+async function cleanupTmpFile(filePath: string): Promise<void> {
+  await unlink(filePath).catch(() => {})
 }
 
 export function createImportWorker() {
   const worker = new Worker<ImportJobPayload>(
     'import',
     async job => {
-      const { jobId, tenantId, rows, mode } = job.data
+      const { jobId, tenantId, filePath, fileName, mode } = job.data
+
+      // Lê e parseia o arquivo no worker — HTTP process nunca carregou o conteúdo
+      let fileBuffer: Buffer
+      try {
+        fileBuffer = await readFile(filePath)
+      } catch {
+        throw new Error(`Arquivo temporário não encontrado: ${filePath}`)
+      }
+
+      const { rows, errors: parseErrors } = await parseSpreadsheet(fileBuffer, fileName)
+
+      // Arquivo lido — pode deletar o temporário imediatamente
+      await cleanupTmpFile(filePath)
 
       const [, geocodingPriority] = await Promise.all([
         importRepository.update(jobId, {
@@ -49,8 +67,8 @@ export function createImportWorker() {
 
       let created = 0
       let updated = 0
-      let failed = 0
-      const errorLog: Array<{ row: number; message: string }> = []
+      let failed = parseErrors.length
+      const errorLog: Array<{ row: number; message: string }> = parseErrors.map(e => ({ row: e.line, message: e.message }))
       const processedIds = new Set<string>()
 
       const pinTypeCache = await buildPinTypeCache(tenantId)
@@ -62,7 +80,6 @@ export function createImportWorker() {
             ? (pinTypeCache.get(row.pinType.toLowerCase()) ?? null)
             : null
 
-          // On full mode also try matching by name for manually-created partners
           const existing =
             await partnerRepository.findByExternalKey(row.externalKey, tenantId) ??
             (mode !== 'incremental' ? await partnerRepository.findByName(row.name, tenantId) : null)
@@ -131,10 +148,7 @@ export function createImportWorker() {
         finishedAt: new Date(),
       })
 
-      // Send email notifications to uploader + owner
       await sendImportDoneEmails({ jobId, tenantId, created, updated, removed, failed, totalRows: rows.length })
-
-      // Push SSE notification to connected clients
       emitToTenant(tenantId, { type: 'notification' })
     },
     {
@@ -145,7 +159,9 @@ export function createImportWorker() {
 
   worker.on('failed', async (job: { data: ImportJobPayload } | undefined) => {
     if (!job) return
-    const { jobId, tenantId } = job.data
+    const { jobId, tenantId, filePath } = job.data
+    // Garante limpeza do temp mesmo em falha de BullMQ
+    await cleanupTmpFile(filePath)
     try {
       await importRepository.update(jobId, { status: 'failed', finishedAt: new Date() })
     } catch {}
@@ -191,26 +207,21 @@ async function sendImportDoneEmails(opts: {
 
     const subject = `✅ Importação concluída — ${job.fileName ?? 'planilha'}`
 
-    // Always notify the uploader
     await sendMail({ to: uploader.email, subject, html })
 
-    // Notify the owner if different from uploader
     if (owner && owner.id !== uploader.id) {
       await sendMail({ to: owner.email, subject, html })
     }
   } catch (err) {
-    // Email failure must never break the import job itself
     console.error('[import-worker] Falha ao enviar e-mail de conclusão:', err)
   }
 }
 
-async function softDeleteStale(tenantId: string, processedKeys: Set<string>, jobId: string): Promise<number> {
-  const existingKeys = await partnerRepository.findAllImportedKeys(tenantId)
-  const toDelete = existingKeys.filter(k => !processedKeys.has(k))
+async function softDeleteStale(tenantId: string, processedIds: Set<string>, jobId: string): Promise<number> {
+  const existingIds = await partnerRepository.findAllImportedIds(tenantId)
+  const toDelete = existingIds.filter(id => !processedIds.has(id))
 
-  // softDeleteByExternalKeys recebe as chaves a PRESERVAR (excludeKeys = NOT IN).
-  // Passamos processedKeys para que apenas os registros ausentes da nova planilha sejam deletados.
-  await partnerRepository.softDeleteByExternalKeys(tenantId, Array.from(processedKeys), jobId)
+  await partnerRepository.softDeleteNonProcessedImports(tenantId, Array.from(processedIds), jobId)
 
   return toDelete.length
 }

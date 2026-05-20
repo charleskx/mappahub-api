@@ -1,10 +1,13 @@
 import dayjs from 'dayjs'
+import { randomUUID } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { db } from '../../config/database'
+import { env } from '../../config/env'
 import { subscriptions, users } from '../../db/schema'
 import { authenticate } from '../../middlewares/authenticate'
 import { AppError } from '../../shared/errors'
+import { hashToken } from '../../shared/token-hash'
 import { generateToken } from '../../shared/utils'
 import { authRepository } from './auth.repository'
 import {
@@ -22,7 +25,7 @@ import {
 import { authService } from './auth.service'
 
 export async function authRoutes(app: FastifyInstance) {
-  app.post('/register', async (req, reply) => {
+  app.post('/register', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
     const body = registerSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -63,7 +66,7 @@ export async function authRoutes(app: FastifyInstance) {
     },
   )
 
-  app.post('/2fa/login', async (req, reply) => {
+  app.post('/2fa/login', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (req, reply) => {
     const body = totpLoginSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -90,7 +93,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true, recoveryCodes: result.recoveryCodes }
   })
 
-  app.post('/2fa/recover', async (req, reply) => {
+  app.post('/2fa/recover', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (req, reply) => {
     const body = recoveryLoginSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -113,7 +116,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true }
   })
 
-  app.post('/refresh', async (req, reply) => {
+  app.post('/refresh', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const body = refreshSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -144,7 +147,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true }
   })
 
-  app.post('/resend-verification', async req => {
+  app.post('/resend-verification', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async req => {
     const { email } = req.body as { email?: string }
     if (!email) throw new AppError('VALIDATION_ERROR', 400, 'E-mail obrigatório')
 
@@ -152,7 +155,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true, message: 'Se o e-mail existir e não estiver verificado, um novo link foi enviado.' }
   })
 
-  app.post('/forgot-password', async req => {
+  app.post('/forgot-password', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async req => {
     const body = forgotPasswordSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -160,7 +163,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true, message: 'Se o e-mail existir, você receberá as instruções.' }
   })
 
-  app.post('/reset-password', async req => {
+  app.post('/reset-password', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async req => {
     const body = resetPasswordSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -168,7 +171,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true }
   })
 
-  app.post('/accept-invite', async (req, reply) => {
+  app.post('/accept-invite', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
     const body = acceptInviteSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -186,14 +189,15 @@ export async function authRoutes(app: FastifyInstance) {
     await authRepository.createRefreshToken({
       userId: user.id,
       tenantId: user.tenantId,
-      token: refreshTokenValue,
+      token: hashToken(refreshTokenValue, env.JWT_SECRET),
+      familyId: randomUUID(),
       expiresAt: dayjs().add(30, 'day').toDate(),
     })
 
     return { accessToken, refreshToken: refreshTokenValue }
   })
 
-  app.post('/google', async (req, reply) => {
+  app.post('/google', { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } }, async (req, reply) => {
     const { credential } = req.body as { credential?: string }
     if (!credential) throw new AppError('VALIDATION_ERROR', 400, 'credential obrigatório')
 

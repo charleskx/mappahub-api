@@ -17,6 +17,11 @@ const FIXED_COLUMNS: Record<string, string> = {
 
 type Requester = { id: string; role: string; tenantId: string }
 
+function neutralizeFormula(value: string): string {
+  // Prefixing with ' prevents spreadsheet apps from interpreting as a formula
+  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value
+}
+
 function escapeCsvField(value: string): string {
   if (value.includes(',') || value.includes('"') || value.includes('\n')) {
     return `"${value.replace(/"/g, '""')}"`
@@ -101,8 +106,8 @@ export const exportService = {
 
     if (input.format === 'csv') {
       const lines = [
-        headers.map(escapeCsvField).join(','),
-        ...sheetRows.map(row => row.map(escapeCsvField).join(',')),
+        headers.map(h => escapeCsvField(neutralizeFormula(h))).join(','),
+        ...sheetRows.map(row => row.map(v => escapeCsvField(neutralizeFormula(v))).join(',')),
       ]
       // BOM para compatibilidade com Excel ao abrir CSV
       const buffer = Buffer.concat([
@@ -114,9 +119,9 @@ export const exportService = {
 
     const wb = new ExcelJS.Workbook()
     const ws = wb.addWorksheet('Parceiros')
-    ws.addRow(headers)
+    ws.addRow(headers.map(neutralizeFormula))
     for (const row of sheetRows) {
-      ws.addRow(row)
+      ws.addRow(row.map(neutralizeFormula))
     }
 
     const buffer = Buffer.from(await wb.xlsx.writeBuffer())

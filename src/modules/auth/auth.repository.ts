@@ -30,22 +30,24 @@ export const authRepository = {
     return user ?? null
   },
 
-  async findUserByVerifyToken(token: string) {
+  // token recebido já deve ser o HASH (HMAC-SHA256)
+  async findUserByVerifyToken(tokenHash: string) {
     const [user] = await db
       .select()
       .from(users)
-      .where(and(eq(users.emailVerifyToken, token), isNull(users.deletedAt)))
+      .where(and(eq(users.emailVerifyToken, tokenHash), isNull(users.deletedAt)))
       .limit(1)
     return user ?? null
   },
 
-  async findUserByResetToken(token: string) {
+  // token recebido já deve ser o HASH (HMAC-SHA256)
+  async findUserByResetToken(tokenHash: string) {
     const [user] = await db
       .select()
       .from(users)
       .where(
         and(
-          eq(users.resetPasswordToken, token),
+          eq(users.resetPasswordToken, tokenHash),
           isNull(users.deletedAt),
           gt(users.resetPasswordExpiresAt, new Date()),
         ),
@@ -67,11 +69,12 @@ export const authRepository = {
     await db.update(users).set(data).where(eq(users.id, id))
   },
 
-  async findRefreshToken(token: string) {
+  // token recebido já deve ser o HASH (HMAC-SHA256)
+  async findRefreshToken(tokenHash: string) {
     const [rt] = await db
       .select()
       .from(refreshTokens)
-      .where(eq(refreshTokens.token, token))
+      .where(eq(refreshTokens.token, tokenHash))
       .limit(1)
     return rt ?? null
   },
@@ -79,7 +82,8 @@ export const authRepository = {
   async createRefreshToken(data: {
     userId: string
     tenantId: string
-    token: string
+    token: string   // HASH — nunca o valor bruto
+    familyId: string
     expiresAt: Date
   }) {
     await db.insert(refreshTokens).values(data)
@@ -87,5 +91,13 @@ export const authRepository = {
 
   async revokeRefreshToken(id: string) {
     await db.update(refreshTokens).set({ revokedAt: new Date() }).where(eq(refreshTokens.id, id))
+  },
+
+  /** Revoga toda a família de tokens — chamado quando reuse de token revogado é detectado. */
+  async revokeRefreshTokenFamily(familyId: string) {
+    await db
+      .update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(refreshTokens.familyId, familyId), isNull(refreshTokens.revokedAt)))
   },
 }

@@ -7,6 +7,7 @@ type User = typeof users.$inferSelect
 function sanitizeUser(user: User) {
   const {
     passwordHash,
+    totpSecret,
     emailVerifyToken,
     emailVerifyExpiresAt,
     resetPasswordToken,
@@ -29,7 +30,7 @@ export const userService = {
   async getUserById(id: string, tenantId: string) {
     const user = await userRepository.findById(id, tenantId)
     if (!user) throw new AppError('USER_NOT_FOUND', 404, 'Usuário não encontrado')
-    return user
+    return sanitizeUser(user)
   },
 
   async inviteUser(
@@ -90,7 +91,7 @@ export const userService = {
 
     const updated = await userRepository.update(id, requester.tenantId, data)
     if (!updated) throw new AppError('USER_NOT_FOUND', 404)
-    return updated
+    return sanitizeUser(updated)
   },
 
   async deleteUser(id: string, requester: { id: string; role: string; tenantId: string }) {

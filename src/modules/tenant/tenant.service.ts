@@ -9,7 +9,7 @@ import type { UpdateSettingsInput } from './tenant.schema'
 
 type Requester = { id: string; role: string; tenantId: string }
 
-const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml']
+const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp']
 const MAX_SIZE = 2 * 1024 * 1024 // 2 MB
 
 export const tenantService = {
@@ -35,7 +35,7 @@ export const tenantService = {
     const file = await req.file()
     if (!file) throw new AppError('FILE_REQUIRED', 400, 'Nenhum arquivo enviado')
     if (!ALLOWED_MIME.includes(file.mimetype)) {
-      throw new AppError('INVALID_FILE_TYPE', 400, 'Formato inválido. Use JPG, PNG, WebP ou SVG')
+      throw new AppError('INVALID_FILE_TYPE', 400, 'Formato inválido. Use JPG, PNG ou WebP')
     }
 
     const chunks: Buffer[] = []

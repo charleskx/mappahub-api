@@ -128,20 +128,6 @@ export const partnerRepository = {
     })
   },
 
-  async findAllImportedKeys(tenantId: string): Promise<string[]> {
-    const rows = await db
-      .select({ externalKey: partners.externalKey })
-      .from(partners)
-      .where(
-        and(
-          eq(partners.tenantId, tenantId),
-          eq(partners.source, 'import'),
-          isNull(partners.deletedAt),
-        ),
-      )
-    return rows.map(r => r.externalKey).filter(Boolean) as string[]
-  },
-
   async create(
     tenantId: string,
     data: CreatePartnerInput & { source?: string; externalKey?: string; pinTypeId?: string | null; importJobId?: string },
@@ -221,22 +207,31 @@ export const partnerRepository = {
       .where(and(eq(partners.id, id), eq(partners.tenantId, tenantId)))
   },
 
-  /** Soft-deletes ALL partners whose externalKey is NOT in `keepKeys` (full-replace mode). */
-  async softDeleteByExternalKeys(tenantId: string, keepIds: string[], jobId?: string) {
+  /** Soft-deletes imported partners whose ID is NOT in `keepIds` (full-replace mode). Only touches source='import' rows. */
+  async softDeleteNonProcessedImports(tenantId: string, keepIds: string[], jobId?: string) {
     const jobIdVal = jobId ?? null
     if (keepIds.length === 0) {
       await db
         .update(partners)
         .set({ deletedAt: new Date(), updatedAt: new Date(), deletedByJobId: jobIdVal })
-        .where(and(eq(partners.tenantId, tenantId), isNull(partners.deletedAt)))
+        .where(and(eq(partners.tenantId, tenantId), eq(partners.source, 'import'), isNull(partners.deletedAt)))
       return
     }
     await db.execute(
       sql`UPDATE partners SET deleted_at = NOW(), updated_at = NOW(), deleted_by_job_id = ${jobIdVal}
           WHERE tenant_id = ${tenantId}
+            AND source = 'import'
             AND deleted_at IS NULL
             AND id NOT IN (${sql.join(keepIds.map(k => sql`${k}`), sql`, `)})`,
     )
+  },
+
+  async findAllImportedIds(tenantId: string): Promise<string[]> {
+    const rows = await db
+      .select({ id: partners.id })
+      .from(partners)
+      .where(and(eq(partners.tenantId, tenantId), eq(partners.source, 'import'), isNull(partners.deletedAt)))
+    return rows.map(r => r.id)
   },
 
   async getColumns(tenantId: string) {

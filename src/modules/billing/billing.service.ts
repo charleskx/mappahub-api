@@ -24,8 +24,6 @@ export const billingService = {
     const priceId = PRICE_MAP[input.plan]
     if (!priceId) throw new AppError('PLAN_NOT_CONFIGURED', 400, 'Plano não configurado')
 
-      console.log('priceId', priceId)
-
     const sub = await billingRepository.findSubscriptionByTenantId(tenantId)
     if (!sub) throw new AppError('SUBSCRIPTION_NOT_FOUND', 404, 'Assinatura não encontrada')
 

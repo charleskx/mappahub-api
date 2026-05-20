@@ -13,6 +13,7 @@ export const refreshTokens = pgTable(
       .references(() => tenants.id)
       .notNull(),
     token: varchar('token', { length: 500 }).notNull().unique(),
+    familyId: uuid('family_id').notNull().defaultRandom(),
     expiresAt: timestamp('expires_at').notNull(),
     revokedAt: timestamp('revoked_at'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -20,5 +21,6 @@ export const refreshTokens = pgTable(
   t => ({
     tokenIdx: index('refresh_tokens_token_idx').on(t.token),
     userIdx: index('refresh_tokens_user_idx').on(t.userId),
+    familyIdx: index('refresh_tokens_family_idx').on(t.familyId),
   }),
 )

@@ -27,6 +27,10 @@ export async function billingRoutes(app: FastifyInstance) {
   })
 
   app.post('/checkout', { preHandler: [authenticate] }, async (req, reply) => {
+    if (req.userRole !== 'owner' && req.userRole !== 'super_admin') {
+      throw new AppError('FORBIDDEN', 403, 'Apenas o owner pode iniciar o checkout')
+    }
+
     const body = createCheckoutSchema.safeParse(req.body)
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
@@ -35,6 +39,10 @@ export async function billingRoutes(app: FastifyInstance) {
   })
 
   app.post('/portal', { preHandler: [authenticate] }, async (req, reply) => {
+    if (req.userRole !== 'owner' && req.userRole !== 'super_admin') {
+      throw new AppError('FORBIDDEN', 403, 'Apenas o owner pode acessar o portal de billing')
+    }
+
     const result = await billingService.createPortalSession(req.tenantId)
     return reply.status(201).send(result)
   })

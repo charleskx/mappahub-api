@@ -1,5 +1,6 @@
 import argon2 from 'argon2'
 import dayjs from 'dayjs'
+import { randomUUID } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import { and, isNull } from 'drizzle-orm'
 import { OAuth2Client } from 'google-auth-library'
@@ -7,9 +8,12 @@ import speakeasy from 'speakeasy'
 import QRCode from 'qrcode'
 import { db } from '../../config/database'
 import { env } from '../../config/env'
+import { redis } from '../../config/redis'
 import { refreshTokens, subscriptions, tenantSettings, tenants, totpRecoveryCodes, users } from '../../db/schema'
 import { AppError } from '../../shared/errors'
 import { inviteEmailHtml, resetPasswordHtml, sendMail, verifyEmailHtml } from '../../shared/mailer'
+import { hashToken } from '../../shared/token-hash'
+import { encryptSecret, decryptSecret } from '../../shared/crypto'
 import { generateToken, slugify } from '../../shared/utils'
 import { authRepository } from './auth.repository'
 import type {
@@ -19,8 +23,55 @@ import type {
   ResetPasswordInput,
 } from './auth.schema'
 
-// temp tokens armazenados em memória — suficiente para instância única; usar Redis em cluster
-const tempTokens = new Map<string, { userId: string; expiresAt: Date }>()
+// ── TOTP helpers ─────────────────────────────────────────────────────────────
+
+function encryptTotpSecret(plain: string): string {
+  if (!env.TOTP_ENCRYPTION_KEY) return plain
+  return encryptSecret(plain, env.TOTP_ENCRYPTION_KEY)
+}
+
+function decryptTotpSecret(stored: string): string {
+  if (!env.TOTP_ENCRYPTION_KEY) return stored
+  return decryptSecret(stored, env.TOTP_ENCRYPTION_KEY)
+}
+
+// ── 2FA temp token helpers (Redis com TTL de 5 min) ─────────────────────────
+
+const TEMP_TTL = 300       // 5 minutos
+const TEMP_MAX_ATTEMPTS = 5
+
+async function storeTempToken(tempToken: string, userId: string): Promise<void> {
+  await redis.setex(`2fa:temp:${tempToken}`, TEMP_TTL, userId)
+}
+
+async function consumeTempToken(tempToken: string): Promise<string> {
+  const userId = await redis.get(`2fa:temp:${tempToken}`)
+  if (!userId) throw new AppError('INVALID_TOKEN', 401, 'Token temporário inválido ou expirado')
+  return userId
+}
+
+async function deleteTempToken(tempToken: string): Promise<void> {
+  await redis.del(`2fa:temp:${tempToken}`)
+  await redis.del(`2fa:attempts:${tempToken}`)
+}
+
+async function incrementAndCheckAttempts(tempToken: string): Promise<void> {
+  const key = `2fa:attempts:${tempToken}`
+  const attempts = await redis.incr(key)
+  if (attempts === 1) await redis.expire(key, TEMP_TTL)
+  if (attempts > TEMP_MAX_ATTEMPTS) {
+    await redis.del(`2fa:temp:${tempToken}`)
+    throw new AppError('TOO_MANY_2FA_ATTEMPTS', 429, 'Muitas tentativas. Faça login novamente.')
+  }
+}
+
+// ── Utilitários de refresh token ─────────────────────────────────────────────
+
+function makeRefreshToken() {
+  const value = generateToken(64)
+  const hash = hashToken(value, env.JWT_SECRET)
+  return { value, hash }
+}
 
 export const authService = {
   async register({ tenantName, name, email, password }: RegisterInput) {
@@ -32,8 +83,10 @@ export const authService = {
     if (slugTaken) slug = `${slug}-${generateToken(4)}`
 
     const passwordHash = await argon2.hash(password)
-    const emailVerifyToken = generateToken()
-    const refreshTokenValue = generateToken(64)
+    const emailVerifyTokenValue = generateToken()
+    const emailVerifyTokenHash = hashToken(emailVerifyTokenValue, env.JWT_SECRET)
+    const rt = makeRefreshToken()
+    const familyId = randomUUID()
 
     const { user, tenant } = await db.transaction(async tx => {
       const [tenant] = await tx
@@ -49,7 +102,7 @@ export const authService = {
           email,
           passwordHash,
           role: 'owner',
-          emailVerifyToken,
+          emailVerifyToken: emailVerifyTokenHash,
           emailVerifyExpiresAt: dayjs().add(24, 'hour').toDate(),
           updatedAt: new Date(),
         })
@@ -70,7 +123,8 @@ export const authService = {
       await tx.insert(refreshTokens).values({
         userId: user.id,
         tenantId: tenant.id,
-        token: refreshTokenValue,
+        token: rt.hash,
+        familyId,
         expiresAt: dayjs().add(30, 'day').toDate(),
       })
 
@@ -80,10 +134,10 @@ export const authService = {
     sendMail({
       to: email,
       subject: 'Verifique seu e-mail — MappaHub',
-      html: verifyEmailHtml(emailVerifyToken, env.APP_URL),
+      html: verifyEmailHtml(emailVerifyTokenValue, env.APP_URL),
     }).catch(err => console.error('[mailer]', err))
 
-    return { user, tenant, refreshToken: refreshTokenValue }
+    return { user, tenant, refreshToken: rt.value }
   },
 
   async loginWithGoogle(credential: string) {
@@ -107,11 +161,9 @@ export const authService = {
 
     const { sub: googleId, email, name = email.split('@')[0] } = payload
 
-    // user already linked to Google
     let user = await authRepository.findUserByGoogleId(googleId)
 
     if (!user) {
-      // user registered with email/password — link Google account
       const existing = await authRepository.findUserByEmail(email)
       if (existing) {
         await authRepository.updateUser(existing.id, { googleId, emailVerified: true, updatedAt: new Date() })
@@ -120,7 +172,6 @@ export const authService = {
     }
 
     if (!user) {
-      // brand new user — create tenant + owner account
       let slug = slugify(name)
       const slugTaken = await authRepository.findTenantBySlug(slug)
       if (slugTaken) slug = `${slug}-${generateToken(4)}`
@@ -159,15 +210,16 @@ export const authService = {
       user = result.user
     }
 
-    const refreshTokenValue = generateToken(64)
+    const rt = makeRefreshToken()
     await authRepository.createRefreshToken({
       userId: user!.id,
       tenantId: user!.tenantId,
-      token: refreshTokenValue,
+      token: rt.hash,
+      familyId: randomUUID(),
       expiresAt: dayjs().add(30, 'day').toDate(),
     })
 
-    return { user: user!, refreshToken: refreshTokenValue }
+    return { user: user!, refreshToken: rt.value }
   },
 
   async login({ email, password }: LoginInput) {
@@ -185,49 +237,52 @@ export const authService = {
 
     if (user.totpEnabled && user.totpSecret) {
       const tempToken = generateToken(32)
-      tempTokens.set(tempToken, {
-        userId: user.id,
-        expiresAt: dayjs().add(5, 'minute').toDate(),
-      })
+      await storeTempToken(tempToken, user.id)
       return { requiresTwoFactor: true, tempToken }
     }
 
-    const refreshTokenValue = generateToken(64)
-
+    const rt = makeRefreshToken()
     await authRepository.createRefreshToken({
       userId: user.id,
       tenantId: user.tenantId,
-      token: refreshTokenValue,
+      token: rt.hash,
+      familyId: randomUUID(),
       expiresAt: dayjs().add(30, 'day').toDate(),
     })
 
-    return { requiresTwoFactor: false, user, refreshToken: refreshTokenValue }
+    return { requiresTwoFactor: false, user, refreshToken: rt.value }
   },
 
   async loginWithTotp(tempToken: string, code: string) {
-    const entry = tempTokens.get(tempToken)
-    if (!entry || dayjs().isAfter(dayjs(entry.expiresAt))) {
-      throw new AppError('INVALID_TOKEN', 401, 'Token temporário inválido ou expirado')
-    }
+    await incrementAndCheckAttempts(tempToken)
+    const userId = await consumeTempToken(tempToken)
 
-    const user = await authRepository.findUserById(entry.userId)
+    const user = await authRepository.findUserById(userId)
     if (!user || !user.totpSecret)
       throw new AppError('INVALID_TOKEN', 401, 'Token temporário inválido')
 
-    const result = speakeasy.totp.verify({ token: code, secret: user.totpSecret, encoding: 'base32' })
+    const secret = decryptTotpSecret(user.totpSecret)
+
+    // Re-encrypt on first use if stored in plain text (migration path)
+    if (env.TOTP_ENCRYPTION_KEY && !user.totpSecret.startsWith('enc:v1:')) {
+      await authRepository.updateUser(user.id, { totpSecret: encryptTotpSecret(secret), updatedAt: new Date() })
+    }
+
+    const result = speakeasy.totp.verify({ token: code, secret, encoding: 'base32' })
     if (!result) throw new AppError('INVALID_TOTP', 401, 'Código 2FA inválido')
 
-    tempTokens.delete(tempToken)
+    await deleteTempToken(tempToken)
 
-    const refreshTokenValue = generateToken(64)
+    const rt = makeRefreshToken()
     await authRepository.createRefreshToken({
       userId: user.id,
       tenantId: user.tenantId,
-      token: refreshTokenValue,
+      token: rt.hash,
+      familyId: randomUUID(),
       expiresAt: dayjs().add(30, 'day').toDate(),
     })
 
-    return { user, refreshToken: refreshTokenValue }
+    return { user, refreshToken: rt.value }
   },
 
   async setupTotp(userId: string) {
@@ -239,7 +294,7 @@ export const authService = {
     const otpauth = speakeasy.otpauthURL({ secret, label: user.email, issuer: 'MappaHub', encoding: 'base32' })
     const qrCode = await QRCode.toDataURL(otpauth)
 
-    await authRepository.updateUser(userId, { totpSecret: secret, updatedAt: new Date() })
+    await authRepository.updateUser(userId, { totpSecret: encryptTotpSecret(secret), updatedAt: new Date() })
 
     return { secret, qrCode }
   },
@@ -251,10 +306,10 @@ export const authService = {
     }
     if (user.totpEnabled) throw new AppError('TOTP_ALREADY_ENABLED', 409, '2FA já está ativado')
 
-    const result = speakeasy.totp.verify({ token: code, secret: user.totpSecret, encoding: 'base32' })
+    const secret = decryptTotpSecret(user.totpSecret)
+    const result = speakeasy.totp.verify({ token: code, secret, encoding: 'base32' })
     if (!result) throw new AppError('INVALID_TOTP', 401, 'Código 2FA inválido')
 
-    // Generate 8 recovery codes and store hashed versions
     const plainCodes = Array.from({ length: 8 }, () => {
       const a = generateToken(4).toUpperCase()
       const b = generateToken(4).toUpperCase()
@@ -263,9 +318,7 @@ export const authService = {
 
     await db.transaction(async tx => {
       await tx.update(users).set({ totpEnabled: true, updatedAt: new Date() }).where(eq(users.id, userId))
-      // Remove any old recovery codes
       await tx.delete(totpRecoveryCodes).where(eq(totpRecoveryCodes.userId, userId))
-      // Insert new hashed codes
       const hashed = await Promise.all(plainCodes.map(c => argon2.hash(c)))
       await tx.insert(totpRecoveryCodes).values(hashed.map(codeHash => ({ userId, codeHash })))
     })
@@ -279,7 +332,8 @@ export const authService = {
       throw new AppError('TOTP_NOT_ENABLED', 400, '2FA não está ativado')
     }
 
-    const result = speakeasy.totp.verify({ token: code, secret: user.totpSecret, encoding: 'base32' })
+    const secret = decryptTotpSecret(user.totpSecret)
+    const result = speakeasy.totp.verify({ token: code, secret, encoding: 'base32' })
     if (!result) throw new AppError('INVALID_TOTP', 401, 'Código 2FA inválido')
 
     await db.transaction(async tx => {
@@ -289,15 +343,12 @@ export const authService = {
   },
 
   async loginWithRecoveryCode(tempToken: string, code: string) {
-    const entry = tempTokens.get(tempToken)
-    if (!entry || dayjs().isAfter(dayjs(entry.expiresAt))) {
-      throw new AppError('INVALID_TOKEN', 401, 'Token temporário inválido ou expirado')
-    }
+    await incrementAndCheckAttempts(tempToken)
+    const userId = await consumeTempToken(tempToken)
 
-    const user = await authRepository.findUserById(entry.userId)
+    const user = await authRepository.findUserById(userId)
     if (!user) throw new AppError('INVALID_TOKEN', 401, 'Token temporário inválido')
 
-    // Find all unused recovery codes for the user
     const stored = await db
       .select()
       .from(totpRecoveryCodes)
@@ -306,7 +357,6 @@ export const authService = {
     const unused = stored.filter(r => !r.usedAt)
     if (!unused.length) throw new AppError('NO_RECOVERY_CODES', 400, 'Sem códigos de recuperação disponíveis')
 
-    // Try to match the provided code against stored hashes
     let matched: typeof unused[0] | null = null
     for (const row of unused) {
       const valid = await argon2.verify(row.codeHash, code.toUpperCase().replace(/\s/g, ''))
@@ -315,35 +365,44 @@ export const authService = {
 
     if (!matched) throw new AppError('INVALID_RECOVERY_CODE', 401, 'Código de recuperação inválido')
 
-    // Mark code as used
     await db.update(totpRecoveryCodes)
       .set({ usedAt: new Date() })
       .where(eq(totpRecoveryCodes.id, matched.id))
 
-    tempTokens.delete(tempToken)
+    await deleteTempToken(tempToken)
 
-    const refreshTokenValue = generateToken(64)
+    const rt = makeRefreshToken()
     await authRepository.createRefreshToken({
       userId: user.id,
       tenantId: user.tenantId,
-      token: refreshTokenValue,
+      token: rt.hash,
+      familyId: randomUUID(),
       expiresAt: dayjs().add(30, 'day').toDate(),
     })
 
-    return { user, refreshToken: refreshTokenValue }
+    return { user, refreshToken: rt.value }
   },
 
   async refresh(token: string) {
-    const rt = await authRepository.findRefreshToken(token)
+    const tokenHash = hashToken(token, env.JWT_SECRET)
+    const rt = await authRepository.findRefreshToken(tokenHash)
 
-    if (!rt || rt.revokedAt || dayjs().isAfter(dayjs(rt.expiresAt))) {
-      throw new AppError('INVALID_REFRESH_TOKEN', 401, 'Refresh token inválido ou expirado')
+    if (!rt) throw new AppError('INVALID_REFRESH_TOKEN', 401, 'Refresh token inválido ou expirado')
+
+    // Reuse detection: token revogado foi apresentado → família inteira comprometida
+    if (rt.revokedAt) {
+      await authRepository.revokeRefreshTokenFamily(rt.familyId)
+      throw new AppError('INVALID_REFRESH_TOKEN', 401, 'Token comprometido. Faça login novamente.')
+    }
+
+    if (dayjs().isAfter(dayjs(rt.expiresAt))) {
+      throw new AppError('INVALID_REFRESH_TOKEN', 401, 'Refresh token expirado')
     }
 
     const user = await authRepository.findUserById(rt.userId)
     if (!user) throw new AppError('USER_NOT_FOUND', 404, 'Usuário não encontrado')
 
-    const newTokenValue = generateToken(64)
+    const newRt = makeRefreshToken()
 
     await db.transaction(async tx => {
       await tx
@@ -354,23 +413,26 @@ export const authService = {
       await tx.insert(refreshTokens).values({
         userId: user.id,
         tenantId: user.tenantId,
-        token: newTokenValue,
+        token: newRt.hash,
+        familyId: rt.familyId,   // preserva a família na rotação
         expiresAt: dayjs().add(30, 'day').toDate(),
       })
     })
 
-    return { user, refreshToken: newTokenValue }
+    return { user, refreshToken: newRt.value }
   },
 
   async logout(token: string) {
-    const rt = await authRepository.findRefreshToken(token)
+    const tokenHash = hashToken(token, env.JWT_SECRET)
+    const rt = await authRepository.findRefreshToken(tokenHash)
     if (rt && !rt.revokedAt) {
       await authRepository.revokeRefreshToken(rt.id)
     }
   },
 
   async verifyEmail(token: string) {
-    const user = await authRepository.findUserByVerifyToken(token)
+    const tokenHash = hashToken(token, env.JWT_SECRET)
+    const user = await authRepository.findUserByVerifyToken(tokenHash)
     if (!user) throw new AppError('INVALID_TOKEN', 400, 'Token inválido')
 
     if (user.emailVerifyExpiresAt && dayjs().isAfter(dayjs(user.emailVerifyExpiresAt))) {
@@ -387,13 +449,13 @@ export const authService = {
 
   async resendVerification(email: string) {
     const user = await authRepository.findUserByEmail(email)
-    // Resposta genérica para não vazar se o e-mail existe
     if (!user || user.emailVerified) return
 
-    const newToken = generateToken()
+    const newTokenValue = generateToken()
+    const newTokenHash = hashToken(newTokenValue, env.JWT_SECRET)
 
     await authRepository.updateUser(user.id, {
-      emailVerifyToken: newToken,
+      emailVerifyToken: newTokenHash,
       emailVerifyExpiresAt: dayjs().add(24, 'hour').toDate(),
       updatedAt: new Date(),
     })
@@ -401,7 +463,7 @@ export const authService = {
     sendMail({
       to: email,
       subject: 'Verifique seu e-mail — MappaHub',
-      html: verifyEmailHtml(newToken, env.APP_URL),
+      html: verifyEmailHtml(newTokenValue, env.APP_URL),
     }).catch(err => console.error('[mailer]', err))
   },
 
@@ -409,10 +471,11 @@ export const authService = {
     const user = await authRepository.findUserByEmail(email)
     if (!user) return
 
-    const resetToken = generateToken()
+    const resetTokenValue = generateToken()
+    const resetTokenHash = hashToken(resetTokenValue, env.JWT_SECRET)
 
     await authRepository.updateUser(user.id, {
-      resetPasswordToken: resetToken,
+      resetPasswordToken: resetTokenHash,
       resetPasswordExpiresAt: dayjs().add(1, 'hour').toDate(),
       updatedAt: new Date(),
     })
@@ -420,12 +483,13 @@ export const authService = {
     sendMail({
       to: email,
       subject: 'Redefinição de senha — MappaHub',
-      html: resetPasswordHtml(resetToken, env.APP_URL),
+      html: resetPasswordHtml(resetTokenValue, env.APP_URL),
     }).catch(err => console.error('[mailer]', err))
   },
 
   async resetPassword({ token, password }: ResetPasswordInput) {
-    const user = await authRepository.findUserByResetToken(token)
+    const tokenHash = hashToken(token, env.JWT_SECRET)
+    const user = await authRepository.findUserByResetToken(tokenHash)
     if (!user) throw new AppError('INVALID_TOKEN', 400, 'Token inválido ou expirado')
 
     const passwordHash = await argon2.hash(password)
@@ -439,7 +503,8 @@ export const authService = {
   },
 
   async acceptInvite({ token, name, password }: AcceptInviteInput) {
-    const user = await authRepository.findUserByVerifyToken(token)
+    const tokenHash = hashToken(token, env.JWT_SECRET)
+    const user = await authRepository.findUserByVerifyToken(tokenHash)
     if (!user) throw new AppError('INVALID_TOKEN', 400, 'Token de convite inválido')
 
     if (user.emailVerifyExpiresAt && dayjs().isAfter(dayjs(user.emailVerifyExpiresAt))) {
@@ -466,10 +531,11 @@ export const authService = {
       throw new AppError('USER_NOT_FOUND', 404, 'Usuário não encontrado')
     }
 
-    const inviteToken = generateToken()
+    const inviteTokenValue = generateToken()
+    const inviteTokenHash = hashToken(inviteTokenValue, env.JWT_SECRET)
 
     await authRepository.updateUser(user.id, {
-      emailVerifyToken: inviteToken,
+      emailVerifyToken: inviteTokenHash,
       emailVerifyExpiresAt: dayjs().add(7, 'day').toDate(),
       updatedAt: new Date(),
     })
@@ -477,7 +543,7 @@ export const authService = {
     sendMail({
       to: user.email,
       subject: `${inviterName} convidou você para o MappaHub`,
-      html: inviteEmailHtml(inviterName, inviteToken, env.APP_URL),
+      html: inviteEmailHtml(inviterName, inviteTokenValue, env.APP_URL),
     }).catch(err => console.error('[mailer]', err))
   },
 }

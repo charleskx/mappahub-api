@@ -1,5 +1,6 @@
 import cookie from '@fastify/cookie'
 import cors from '@fastify/cors'
+import helmet from '@fastify/helmet'
 import fastifyJwt from '@fastify/jwt'
 import multipart from '@fastify/multipart'
 import rateLimit from '@fastify/rate-limit'
@@ -39,9 +40,18 @@ export async function buildApp() {
     },
   })
 
+  if (env.NODE_ENV === 'production' && !env.CORS_ORIGIN) {
+    throw new Error('CORS_ORIGIN deve ser definido em produção')
+  }
+
   const allowedOrigins = env.CORS_ORIGIN
     ? env.CORS_ORIGIN.split(',').map(o => o.trim())
     : true // development: allow all
+
+  await app.register(helmet, {
+    contentSecurityPolicy: false, // API JSON-only — CSP não se aplica
+    crossOriginEmbedderPolicy: false,
+  })
 
   await app.register(cors, {
     origin: allowedOrigins,

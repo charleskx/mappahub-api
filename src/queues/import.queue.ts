@@ -1,13 +1,12 @@
 import { Queue } from 'bullmq'
 import { redis } from '../config/redis'
-import type { ParsedRow } from '../modules/import/import.parser'
 
 export type ImportJobPayload = {
   jobId: string
   tenantId: string
   userId: string
   fileName: string
-  rows: ParsedRow[]
+  filePath: string   // caminho do arquivo temporário em disco
   mode: 'full' | 'incremental'
 }
 

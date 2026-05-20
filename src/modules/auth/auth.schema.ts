@@ -4,7 +4,7 @@ export const registerSchema = z.object({
   tenantName: z.string().min(2).max(200),
   name: z.string().min(2).max(200),
   email: z.string().email(),
-  password: z.string().min(8),
+  password: z.string().min(12),
 })
 
 export const loginSchema = z.object({
@@ -22,7 +22,7 @@ export const forgotPasswordSchema = z.object({
 
 export const resetPasswordSchema = z.object({
   token: z.string().min(1),
-  password: z.string().min(8),
+  password: z.string().min(12),
 })
 
 export const verifyEmailSchema = z.object({
@@ -32,7 +32,7 @@ export const verifyEmailSchema = z.object({
 export const acceptInviteSchema = z.object({
   token: z.string().min(1),
   name: z.string().min(2).max(200),
-  password: z.string().min(8),
+  password: z.string().min(12),
 })
 
 export const totpVerifySchema = z.object({
