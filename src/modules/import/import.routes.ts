@@ -5,7 +5,7 @@ import { authenticate } from '../../middlewares/authenticate'
 import { subscriptionGuard } from '../../middlewares/subscription-guard'
 import { AppError } from '../../shared/errors'
 import { env } from '../../config/env'
-import { r2, r2Enabled } from '../../config/r2'
+import { r2 } from '../../config/r2'
 import { importRepository } from './import.repository'
 import { importService } from './import.service'
 
@@ -18,7 +18,8 @@ export async function importRoutes(app: FastifyInstance) {
     '/upload',
     { preHandler, config: { rateLimit: { max: 10, timeWindow: '1 hour' } } },
     async (req, reply) => {
-      if (!r2Enabled()) {
+      const bucket = env.R2_BUCKET_NAME
+      if (!r2 || !bucket) {
         throw new AppError('R2_NOT_CONFIGURED', 503, 'Serviço de importação indisponível. Configure R2.')
       }
 
@@ -46,15 +47,15 @@ export async function importRoutes(app: FastifyInstance) {
       }
 
       const r2Key = `imports/${randomUUID()}.${ext}`
-      const bucket = env.R2_BUCKET_NAME
 
       try {
-        await r2?.send(new PutObjectCommand({
+        await r2.send(new PutObjectCommand({
           Bucket: bucket,
           Key: r2Key,
           Body: fileBuffer,
         }))
-      } catch {
+      } catch (err) {
+        req.log.error({ err, r2Key }, 'R2 PutObject failed')
         throw new AppError('UPLOAD_ERROR', 500, 'Erro ao armazenar o arquivo')
       }
 

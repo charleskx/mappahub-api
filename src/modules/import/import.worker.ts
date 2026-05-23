@@ -58,8 +58,8 @@ export function createImportWorker() {
       let fileBuffer: Buffer
       try {
         fileBuffer = await downloadFromR2(r2Key)
-      } catch {
-        throw new Error(`Arquivo não encontrado no armazenamento: ${r2Key}`)
+      } catch (err) {
+        throw new Error(`Falha ao baixar arquivo do R2 (${r2Key}): ${String(err)}`)
       }
 
       let parseResult: Awaited<ReturnType<typeof parseSpreadsheet>>
