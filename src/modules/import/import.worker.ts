@@ -33,10 +33,9 @@ async function buildPinTypeCache(tenantId: string): Promise<Map<string, string>>
 }
 
 async function downloadFromR2(r2Key: string): Promise<Buffer> {
-  const response = await r2!.send(new GetObjectCommand({
-    Bucket: env.R2_BUCKET_NAME!,
-    Key: r2Key,
-  }))
+  const bucket = env.R2_BUCKET_NAME
+  if (!r2 || !bucket) throw new Error('R2 não configurado')
+  const response = await r2.send(new GetObjectCommand({ Bucket: bucket, Key: r2Key }))
   const chunks: Buffer[] = []
   for await (const chunk of response.Body as AsyncIterable<Uint8Array>) {
     chunks.push(Buffer.from(chunk))
@@ -45,11 +44,9 @@ async function downloadFromR2(r2Key: string): Promise<Buffer> {
 }
 
 async function deleteFromR2(r2Key: string): Promise<void> {
-  if (!r2) return
-  await r2.send(new DeleteObjectCommand({
-    Bucket: env.R2_BUCKET_NAME!,
-    Key: r2Key,
-  })).catch(() => {})
+  const bucket = env.R2_BUCKET_NAME
+  if (!r2 || !bucket) return
+  await r2.send(new DeleteObjectCommand({ Bucket: bucket, Key: r2Key })).catch(() => {})
 }
 
 export function createImportWorker() {

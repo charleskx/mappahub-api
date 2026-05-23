@@ -46,10 +46,11 @@ export async function importRoutes(app: FastifyInstance) {
       }
 
       const r2Key = `imports/${randomUUID()}.${ext}`
+      const bucket = env.R2_BUCKET_NAME
 
       try {
-        await r2!.send(new PutObjectCommand({
-          Bucket: env.R2_BUCKET_NAME!,
+        await r2?.send(new PutObjectCommand({
+          Bucket: bucket,
           Key: r2Key,
           Body: fileBuffer,
         }))
