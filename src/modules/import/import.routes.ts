@@ -86,6 +86,9 @@ export async function importRoutes(app: FastifyInstance) {
     const job = await importRepository.findById(id, req.tenantId)
     if (!job) throw new AppError('JOB_NOT_FOUND', 404, 'Job não encontrado')
 
+    for (const [key, val] of Object.entries(reply.getHeaders())) {
+      if (val !== undefined) reply.raw.setHeader(key, val as string | number | string[])
+    }
     reply.raw.setHeader('Content-Type', 'text/event-stream')
     reply.raw.setHeader('Cache-Control', 'no-cache')
     reply.raw.setHeader('Connection', 'keep-alive')

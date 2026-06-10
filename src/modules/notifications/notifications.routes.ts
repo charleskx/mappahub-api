@@ -13,6 +13,11 @@ export async function notificationsRoutes(app: FastifyInstance) {
   app.get('/events', { preHandler: [authenticate] }, async (req, reply) => {
     const tenantId = req.tenantId
 
+    // Flush CORS and other Fastify headers to reply.raw before hijacking —
+    // reply.hijack() bypasses Fastify's send lifecycle so buffered headers never arrive otherwise.
+    for (const [key, val] of Object.entries(reply.getHeaders())) {
+      if (val !== undefined) reply.raw.setHeader(key, val as string | number | string[])
+    }
     reply.raw.setHeader('Content-Type', 'text/event-stream')
     reply.raw.setHeader('Cache-Control', 'no-cache')
     reply.raw.setHeader('Connection', 'keep-alive')
