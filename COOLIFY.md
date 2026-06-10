@@ -264,9 +264,16 @@ SMTP_USER=resend
 SMTP_PASS=re_...
 SMTP_FROM=MappaHub <noreply@mappahub.com.br>
 SENTRY_DSN=https://...@sentry.io/...
+R2_ACCOUNT_ID=seu_account_id
+R2_ACCESS_KEY_ID=sua_access_key
+R2_SECRET_ACCESS_KEY=seu_secret
+R2_BUCKET_NAME=mappahub-assets
+R2_PUBLIC_URL=https://pub-<hash>.r2.dev
 ```
 
 > **`JWT_SECRET`** é obrigatório — o código da API valida essa variável na inicialização, mesmo no worker.
+
+> **`R2_*`** são obrigatórios para o worker processar importações. O fluxo de importação faz upload do arquivo para o R2 na API e o worker faz o download a partir dali — sem essas variáveis, todos os jobs de importação falham com `Error: R2 não configurado`. Use os **mesmos valores** configurados no serviço da API.
 
 ### 6.4 Domínio
 
@@ -435,6 +442,13 @@ Certifique-se de usar a URL **interna** do Coolify (nome do container), não a U
 
 **Worker não processa jobs**
 Verifique se o `REDIS_URL` no worker aponta para o mesmo Redis da API. Acesse a aba **Logs** do serviço worker para ver erros de conexão. Confirme também que o worker está com status **Running** (não apenas **Deployed**).
+
+**Jobs de importação falham com "R2 não configurado" ou "Importação falhou"**
+O worker precisa das variáveis `R2_*` para baixar o arquivo enviado pelo usuário. No log de inicialização do worker procure a linha:
+```
+[worker] R2 configured: true, bucket: NOT SET
+```
+Se aparecer `bucket: NOT SET`, adicione `R2_BUCKET_NAME` (e todas as outras `R2_*`) nas variáveis de ambiente do serviço **mappahub-worker** no Coolify — use os mesmos valores do serviço da API. Após salvar, faça um novo deploy (ou use **Restart** se o Coolify permitir recarregar variáveis sem rebuild).
 
 **Worker para e não reinicia automaticamente**
 O worker usa `pm2-runtime` no start command para manter o processo vivo. Confirme que o start command está exatamente como `npx pm2-runtime dist/worker.js`. Se o PM2 não estiver instalado como dependência, adicione `pm2` ao `package.json`:
