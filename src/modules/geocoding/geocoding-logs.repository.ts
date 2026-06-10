@@ -31,8 +31,8 @@ export const geocodingLogsRepository = {
     return log
   },
 
-  /** Logs for a single partner — most recent first */
-  async findByPartner(partnerId: string) {
+  /** Logs for a single partner — most recent first, scoped to the tenant */
+  async findByPartner(partnerId: string, tenantId: string) {
     return db
       .select({
         id: geocodingLogs.id,
@@ -45,7 +45,7 @@ export const geocodingLogsRepository = {
         attemptedAt: geocodingLogs.attemptedAt,
       })
       .from(geocodingLogs)
-      .where(eq(geocodingLogs.partnerId, partnerId))
+      .where(and(eq(geocodingLogs.partnerId, partnerId), eq(geocodingLogs.tenantId, tenantId)))
       .orderBy(desc(geocodingLogs.attemptedAt))
       .limit(50)
   },

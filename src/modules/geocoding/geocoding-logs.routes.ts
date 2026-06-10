@@ -2,14 +2,17 @@ import type { FastifyInstance } from 'fastify'
 import { eq } from 'drizzle-orm'
 import { db } from '../../config/database'
 import { authenticate } from '../../middlewares/authenticate'
+import { subscriptionGuard } from '../../middlewares/subscription-guard'
 import { partners } from '../../db/schema'
 import { AppError } from '../../shared/errors'
+import { defineAbilityFor } from '../../shared/permissions'
 import { emitToTenant } from '../../shared/sse-bus'
 import { geocodingLogsRepository } from './geocoding-logs.repository'
 import { geocodeAddress } from './geocoding.service'
 
 export async function geocodingLogsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticate)
+  app.addHook('preHandler', subscriptionGuard)
 
   app.get('/geocoding-logs', async (req, reply) => {
     const logs = await geocodingLogsRepository.findFailedByTenant(req.tenantId)
@@ -18,12 +21,16 @@ export async function geocodingLogsRoutes(app: FastifyInstance) {
 
   app.get('/geocoding-logs/partner/:partnerId', async (req, reply) => {
     const { partnerId } = req.params as { partnerId: string }
-    const logs = await geocodingLogsRepository.findByPartner(partnerId)
+    const logs = await geocodingLogsRepository.findByPartner(partnerId, req.tenantId)
     return reply.send(logs)
   })
 
   // Validate an address and, if found, apply it to the partner
   app.post('/geocoding-logs/fix-address/:partnerId', async (req, reply) => {
+    if (!defineAbilityFor({ role: req.userRole }).can('update', 'Partner')) {
+      throw new AppError('FORBIDDEN', 403, 'Sem permissão para editar parceiros')
+    }
+
     const { partnerId } = req.params as { partnerId: string }
     const { address, confirm } = req.body as { address: string; confirm?: boolean }
 
