@@ -283,6 +283,27 @@ describe('adminService', () => {
     await expect(adminService.setGeocodingLimit('t1', { limit: 1, expiresAt: null }, { role: 'owner' }))
       .rejects.toMatchObject({ code: 'FORBIDDEN' })
   })
+
+  it('rejects geocoding ops for a missing tenant', async () => {
+    vi.mocked(adminRepository.findTenantById).mockResolvedValue(null as never)
+    await expect(adminService.getTenantGeocoding('t1', superAdmin)).rejects.toMatchObject({ code: 'TENANT_NOT_FOUND' })
+    await expect(adminService.setGeocodingLimit('t1', { limit: 1, expiresAt: null }, superAdmin))
+      .rejects.toMatchObject({ code: 'TENANT_NOT_FOUND' })
+  })
+
+  it('passes through the remaining super-admin reads', async () => {
+    vi.mocked(adminRepository.listTenantImports).mockResolvedValue([{ id: 'j1' }] as never)
+    await expect(adminService.listTenantImports('t1', superAdmin)).resolves.toEqual([{ id: 'j1' }])
+
+    await adminService.rollbackImport('j1', 't1', superAdmin)
+    expect(adminRepository.rollbackImport).toHaveBeenCalledWith('j1', 't1')
+
+    vi.mocked(adminRepository.listTenantUsers).mockResolvedValue([{ id: 'u2' }] as never)
+    await expect(adminService.listTenantUsers('t1', superAdmin)).resolves.toEqual([{ id: 'u2' }])
+
+    vi.mocked(adminRepository.getMetrics).mockResolvedValue({ tenants: 1 } as never)
+    await expect(adminService.getMetrics(superAdmin)).resolves.toEqual({ tenants: 1 })
+  })
 })
 
 describe('pinTypeService', () => {
@@ -565,6 +586,28 @@ describe('billingService', () => {
     }))
     // não deve tratar como assinatura
     expect(stripe.subscriptions.retrieve).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown credit pack', async () => {
+    await expect(billingService.createCreditsCheckoutSession('t1', { packId: 'bad' } as never))
+      .rejects.toMatchObject({ code: 'PACK_NOT_CONFIGURED' })
+  })
+
+  it('handles subscription.updated webhook and trial-expiry reminders', async () => {
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValue({
+      type: 'customer.subscription.updated',
+      data: { object: {
+        customer: 'cus_1', status: 'active',
+        items: { data: [{ price: { id: 'price_monthly' } }] },
+        current_period_start: 100, current_period_end: 200,
+      } },
+    } as never)
+    vi.mocked(billingRepository.findTenantByStripeCustomerId).mockResolvedValue({ tenantId: 't1' } as never)
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+    expect(billingRepository.updateSubscription).toHaveBeenCalledWith('t1', expect.objectContaining({ status: 'active' }))
+
+    vi.mocked(billingRepository.findExpiringTrials).mockResolvedValue([{ ownerEmail: 'o@e.com', tenantName: 'Acme' }] as never)
+    await expect(billingService.checkExpiringTrials(3)).resolves.toBe(1)
   })
 })
 
