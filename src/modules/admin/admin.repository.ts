@@ -32,6 +32,8 @@ export const adminRepository = {
         email: tenants.email,
         active: tenants.active,
         createdAt: tenants.createdAt,
+        geocodingMonthlyLimit: tenants.geocodingMonthlyLimit,
+        geocodingLimitExpiresAt: tenants.geocodingLimitExpiresAt,
         subscriptionStatus: subscriptions.status,
         planType: subscriptions.planType,
         stripeCustomerId: subscriptions.stripeCustomerId,
@@ -54,6 +56,13 @@ export const adminRepository = {
 
   async setTenantActive(id: string, active: boolean) {
     await db.update(tenants).set({ active, updatedAt: new Date() }).where(eq(tenants.id, id))
+  },
+
+  async setGeocodingLimit(id: string, limit: number | null, expiresAt: Date | null) {
+    await db
+      .update(tenants)
+      .set({ geocodingMonthlyLimit: limit, geocodingLimitExpiresAt: expiresAt, updatedAt: new Date() })
+      .where(eq(tenants.id, id))
   },
 
   async listTenantImports(tenantId: string, limit = 10) {

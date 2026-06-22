@@ -32,6 +32,7 @@ Copie `.env.example` para `.env` e preencha:
 | `SMTP_*` | ✅ prod | Configuração SMTP para envio de e-mails |
 | `CORS_ORIGIN` | ✅ prod | Origens permitidas, separadas por vírgula. Obrigatório em produção — boot falha sem ele |
 | `STRIPE_*` | ⚠️ | Necessário para faturamento |
+| `STRIPE_PRICE_GEO_*` | ⚠️ | Stripe Price (one-time) dos pacotes de créditos extras de geocoding (`1K`/`5K`/`10K`/`25K`) |
 | `GOOGLE_MAPS_API_KEY` | ⚠️ | Necessário para geocoding |
 | `R2_*` | ⚠️ | Necessário para upload de logo no mapa público |
 | `TOTP_ENCRYPTION_KEY` | ⚠️ | Chave AES-256-GCM (64 hex chars) para cifrar `totpSecret` no banco. Gere com `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |

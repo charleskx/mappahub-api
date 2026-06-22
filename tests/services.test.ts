@@ -10,6 +10,22 @@ vi.mock('../src/modules/admin/admin.repository', () => ({
     listTenantUsers: vi.fn(),
     disable2fa: vi.fn(),
     getMetrics: vi.fn(),
+    setGeocodingLimit: vi.fn(),
+  },
+}))
+
+vi.mock('../src/modules/geocoding/geocoding-credits.repository', () => ({
+  geocodingCreditsRepository: {
+    availableBalance: vi.fn(),
+    listActive: vi.fn(),
+    consumeOne: vi.fn(),
+    grantPack: vi.fn(),
+  },
+}))
+
+vi.mock('../src/modules/geocoding/geocoding-logs.repository', () => ({
+  geocodingLogsRepository: {
+    monthlyUsage: vi.fn(),
   },
 }))
 
@@ -161,6 +177,8 @@ vi.mock('../src/shared/mailer', async importOriginal => {
 
 import { adminRepository } from '../src/modules/admin/admin.repository'
 import { adminService } from '../src/modules/admin/admin.service'
+import { geocodingCreditsRepository } from '../src/modules/geocoding/geocoding-credits.repository'
+import { geocodingLogsRepository } from '../src/modules/geocoding/geocoding-logs.repository'
 import { billingRepository } from '../src/modules/billing/billing.repository'
 import { billingService } from '../src/modules/billing/billing.service'
 import { dashboardRepository } from '../src/modules/dashboard/dashboard.repository'
@@ -227,6 +245,43 @@ describe('adminService', () => {
 
     vi.mocked(adminRepository.listTenantUsers).mockResolvedValue([{ id: 'u2', totpEnabled: false }] as never)
     await expect(adminService.disable2fa('u2', 't1', superAdmin)).rejects.toMatchObject({ code: '2FA_NOT_ENABLED' })
+  })
+
+  it('reports tenant geocoding usage with effective limit and credits', async () => {
+    vi.mocked(adminRepository.findTenantById).mockResolvedValue({
+      id: 't1', geocodingMonthlyLimit: 5000, geocodingLimitExpiresAt: null,
+    } as never)
+    vi.mocked(geocodingLogsRepository.monthlyUsage).mockResolvedValue(1200 as never)
+    vi.mocked(geocodingCreditsRepository.availableBalance).mockResolvedValue(800 as never)
+
+    await expect(adminService.getTenantGeocoding('t1', superAdmin)).resolves.toMatchObject({
+      used: 1200,
+      defaultLimit: 2000,
+      monthlyLimit: 5000,
+      effectiveLimit: 5000,
+      creditsTotal: 800,
+    })
+  })
+
+  it('sets and restores the geocoding limit, rejecting invalid input', async () => {
+    vi.mocked(adminRepository.findTenantById).mockResolvedValue({ id: 't1' } as never)
+
+    await adminService.setGeocodingLimit('t1', { limit: 10000, expiresAt: null }, superAdmin)
+    expect(adminRepository.setGeocodingLimit).toHaveBeenCalledWith('t1', 10000, null)
+
+    await adminService.setGeocodingLimit('t1', { limit: null, expiresAt: null }, superAdmin)
+    expect(adminRepository.setGeocodingLimit).toHaveBeenCalledWith('t1', null, null)
+
+    await expect(adminService.setGeocodingLimit('t1', { limit: -5, expiresAt: null }, superAdmin))
+      .rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+    await expect(adminService.setGeocodingLimit('t1', { limit: 100, expiresAt: '2000-01-01T00:00:00.000Z' }, superAdmin))
+      .rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+  })
+
+  it('requires super admin for geocoding limit', async () => {
+    await expect(adminService.getTenantGeocoding('t1', { role: 'owner' })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await expect(adminService.setGeocodingLimit('t1', { limit: 1, expiresAt: null }, { role: 'owner' }))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' })
   })
 })
 
@@ -474,6 +529,42 @@ describe('billingService', () => {
     vi.mocked(billingRepository.findSubscriptionByTenantId).mockResolvedValue(null as never)
     await expect(billingService.getSubscription('t1')).rejects.toMatchObject({ code: 'SUBSCRIPTION_NOT_FOUND' })
     await expect(billingService.createPortalSession('t1')).rejects.toMatchObject({ code: 'NO_STRIPE_CUSTOMER' })
+  })
+
+  it('lists credit packs catalog', () => {
+    const packs = billingService.listCreditPacks()
+    expect(packs.map(p => p.id)).toEqual(['1k', '5k', '10k', '25k'])
+    expect(packs[1]).toMatchObject({ credits: 5000, validityDays: 90 })
+  })
+
+  it('creates a one-time checkout session for a credit pack', async () => {
+    vi.mocked(billingRepository.findSubscriptionByTenantId).mockResolvedValue({ stripeCustomerId: 'cus_1' } as never)
+    vi.mocked(stripe.checkout.sessions.create).mockResolvedValue({ url: 'https://stripe.test/credits' } as never)
+
+    await expect(billingService.createCreditsCheckoutSession('t1', { packId: '5k' })).resolves.toEqual({ url: 'https://stripe.test/credits' })
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'payment',
+      line_items: [{ price: 'price_geo_5k', quantity: 1 }],
+      metadata: { tenantId: 't1', packId: '5k' },
+    }))
+  })
+
+  it('grants a credit pack lot from the payment webhook (idempotent by session)', async () => {
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValue({
+      type: 'checkout.session.completed',
+      data: { object: { id: 'cs_1', mode: 'payment', amount_total: 11900, metadata: { tenantId: 't1', packId: '5k' } } },
+    } as never)
+
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+
+    expect(geocodingCreditsRepository.grantPack).toHaveBeenCalledWith('t1', expect.objectContaining({
+      quantity: 5000,
+      stripeSessionId: 'cs_1',
+      amountCents: 11900,
+      expiresAt: expect.any(Date),
+    }))
+    // não deve tratar como assinatura
+    expect(stripe.subscriptions.retrieve).not.toHaveBeenCalled()
   })
 })
 

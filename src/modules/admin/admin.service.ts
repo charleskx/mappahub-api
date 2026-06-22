@@ -1,4 +1,7 @@
 import { AppError } from '../../shared/errors'
+import { geocodingCreditsRepository } from '../geocoding/geocoding-credits.repository'
+import { geocodingLogsRepository } from '../geocoding/geocoding-logs.repository'
+import { effectiveLimit, GEOCODING_DEFAULT_MONTHLY_LIMIT } from '../geocoding/geocoding.limits'
 import { adminRepository } from './admin.repository'
 
 type Requester = { role: string }
@@ -66,5 +69,49 @@ export const adminService = {
   async getMetrics(requester: Requester) {
     assertSuperAdmin(requester)
     return adminRepository.getMetrics()
+  },
+
+  async getTenantGeocoding(tenantId: string, requester: Requester) {
+    assertSuperAdmin(requester)
+    const tenant = await adminRepository.findTenantById(tenantId)
+    if (!tenant) throw new AppError('TENANT_NOT_FOUND', 404, 'Tenant não encontrado')
+
+    const [used, creditsTotal] = await Promise.all([
+      geocodingLogsRepository.monthlyUsage(tenantId),
+      geocodingCreditsRepository.availableBalance(tenantId),
+    ])
+
+    return {
+      used,
+      defaultLimit: GEOCODING_DEFAULT_MONTHLY_LIMIT,
+      monthlyLimit: tenant.geocodingMonthlyLimit,
+      limitExpiresAt: tenant.geocodingLimitExpiresAt?.toISOString() ?? null,
+      effectiveLimit: effectiveLimit(tenant),
+      creditsTotal,
+    }
+  },
+
+  async setGeocodingLimit(
+    tenantId: string,
+    input: { limit: number | null; expiresAt: string | null },
+    requester: Requester,
+  ) {
+    assertSuperAdmin(requester)
+    const tenant = await adminRepository.findTenantById(tenantId)
+    if (!tenant) throw new AppError('TENANT_NOT_FOUND', 404, 'Tenant não encontrado')
+
+    if (input.limit != null && (!Number.isInteger(input.limit) || input.limit < 0)) {
+      throw new AppError('VALIDATION_ERROR', 400, 'Limite deve ser um inteiro >= 0')
+    }
+
+    let expiresAt: Date | null = null
+    if (input.expiresAt) {
+      expiresAt = new Date(input.expiresAt)
+      if (Number.isNaN(expiresAt.getTime()) || expiresAt < new Date()) {
+        throw new AppError('VALIDATION_ERROR', 400, 'Validade deve ser uma data futura')
+      }
+    }
+
+    await adminRepository.setGeocodingLimit(tenantId, input.limit, expiresAt)
   },
 }

@@ -52,4 +52,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/metrics', async req => {
     return adminService.getMetrics({ role: req.userRole })
   })
+
+  app.get('/tenants/:id/geocoding', async req => {
+    const { id } = req.params as { id: string }
+    return adminService.getTenantGeocoding(id, { role: req.userRole })
+  })
+
+  app.patch('/tenants/:id/geocoding-limit', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { limit, expiresAt } = req.body as { limit?: number | null; expiresAt?: string | null }
+    await adminService.setGeocodingLimit(id, { limit: limit ?? null, expiresAt: expiresAt ?? null }, { role: req.userRole })
+    return reply.status(204).send()
+  })
 }

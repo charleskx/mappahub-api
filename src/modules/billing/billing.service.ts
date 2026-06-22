@@ -3,12 +3,31 @@ import { env } from '../../config/env'
 import { stripe } from '../../config/stripe'
 import { AppError } from '../../shared/errors'
 import { sendMail, trialExpiringHtml } from '../../shared/mailer'
+import { geocodingCreditsRepository } from '../geocoding/geocoding-credits.repository'
+import { findPack, GEO_PACKS } from '../geocoding/geocoding.limits'
 import { billingRepository } from './billing.repository'
-import type { CreateCheckoutInput } from './billing.schema'
+import type { CheckoutCreditsInput, CreateCheckoutInput } from './billing.schema'
 
 const PRICE_MAP: Record<string, string | undefined> = {
   monthly: env.STRIPE_PRICE_MONTHLY,
   annual: env.STRIPE_PRICE_ANNUAL,
+}
+
+/** Garante (criando se preciso) o Stripe customer do tenant e devolve seu id. */
+async function ensureCustomerId(tenantId: string): Promise<string> {
+  const sub = await billingRepository.findSubscriptionByTenantId(tenantId)
+  if (!sub) throw new AppError('SUBSCRIPTION_NOT_FOUND', 404, 'Assinatura não encontrada')
+  if (sub.stripeCustomerId) return sub.stripeCustomerId
+
+  const tenant = await billingRepository.findTenantById(tenantId)
+  const owner = await billingRepository.findTenantOwner(tenantId)
+  const customer = await stripe.customers.create({
+    name: tenant?.name,
+    email: owner?.email,
+    metadata: { tenantId },
+  })
+  await billingRepository.updateSubscription(tenantId, { stripeCustomerId: customer.id })
+  return customer.id
 }
 
 export const billingService = {
@@ -24,22 +43,7 @@ export const billingService = {
     const priceId = PRICE_MAP[input.plan]
     if (!priceId) throw new AppError('PLAN_NOT_CONFIGURED', 400, 'Plano não configurado')
 
-    const sub = await billingRepository.findSubscriptionByTenantId(tenantId)
-    if (!sub) throw new AppError('SUBSCRIPTION_NOT_FOUND', 404, 'Assinatura não encontrada')
-
-    let customerId = sub.stripeCustomerId ?? undefined
-
-    if (!customerId) {
-      const tenant = await billingRepository.findTenantById(tenantId)
-      const owner = await billingRepository.findTenantOwner(tenantId)
-      const customer = await stripe.customers.create({
-        name: tenant?.name,
-        email: owner?.email,
-        metadata: { tenantId },
-      })
-      customerId = customer.id
-      await billingRepository.updateSubscription(tenantId, { stripeCustomerId: customerId })
-    }
+    const customerId = await ensureCustomerId(tenantId)
 
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
@@ -48,6 +52,36 @@ export const billingService = {
       success_url: `${env.APP_URL}/billing?success=1`,
       cancel_url: `${env.APP_URL}/billing?canceled=1`,
       metadata: { tenantId },
+    })
+
+    return { url: session.url }
+  },
+
+  // Catálogo de pacotes de créditos extras de geocoding (para exibição no front)
+  listCreditPacks() {
+    return GEO_PACKS.map(({ id, credits, validityDays, priceCents }) => ({
+      id,
+      credits,
+      validityDays,
+      priceCents,
+    }))
+  },
+
+  async createCreditsCheckoutSession(tenantId: string, input: CheckoutCreditsInput) {
+    if (!env.STRIPE_SECRET_KEY) throw new AppError('STRIPE_NOT_CONFIGURED', 500, 'Stripe não configurado')
+
+    const pack = findPack(input.packId)
+    if (!pack?.priceId) throw new AppError('PACK_NOT_CONFIGURED', 400, 'Pacote não configurado')
+
+    const customerId = await ensureCustomerId(tenantId)
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: 'payment',
+      line_items: [{ price: pack.priceId, quantity: 1 }],
+      success_url: `${env.APP_URL}/geocoding-logs?credits=success`,
+      cancel_url: `${env.APP_URL}/geocoding-logs?credits=canceled`,
+      metadata: { tenantId, packId: pack.id },
     })
 
     return { url: session.url }
@@ -82,7 +116,23 @@ export const billingService = {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session
         const tenantId = session.metadata?.tenantId
-        if (!tenantId || !session.subscription) break
+        if (!tenantId) break
+
+        // Compra avulsa de pacote de créditos extras de geocoding
+        if (session.mode === 'payment' && session.metadata?.packId) {
+          const pack = findPack(session.metadata.packId)
+          if (!pack) break
+          const expiresAt = new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000)
+          await geocodingCreditsRepository.grantPack(tenantId, {
+            quantity: pack.credits,
+            expiresAt,
+            stripeSessionId: session.id,
+            amountCents: session.amount_total ?? pack.priceCents,
+          })
+          break
+        }
+
+        if (!session.subscription) break
 
         const stripeSub = await stripe.subscriptions.retrieve(String(session.subscription))
         const priceId = stripeSub.items.data[0]?.price.id

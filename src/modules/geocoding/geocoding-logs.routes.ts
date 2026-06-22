@@ -7,7 +7,10 @@ import { partners } from '../../db/schema'
 import { AppError } from '../../shared/errors'
 import { defineAbilityFor } from '../../shared/permissions'
 import { emitToTenant } from '../../shared/sse-bus'
+import { tenants } from '../../db/schema'
+import { geocodingCreditsRepository } from './geocoding-credits.repository'
 import { geocodingLogsRepository } from './geocoding-logs.repository'
+import { effectiveLimit } from './geocoding.limits'
 import { geocodeAddress } from './geocoding.service'
 
 export async function geocodingLogsRoutes(app: FastifyInstance) {
@@ -17,6 +20,36 @@ export async function geocodingLogsRoutes(app: FastifyInstance) {
   app.get('/geocoding-logs', async (req, reply) => {
     const logs = await geocodingLogsRepository.findFailedByTenant(req.tenantId)
     return reply.send(logs)
+  })
+
+  // Uso de geocoding do tenant: franquia mensal + saldo de créditos extras
+  app.get('/geocoding-usage', async (req, reply) => {
+    const [tenant] = await db
+      .select({
+        geocodingMonthlyLimit: tenants.geocodingMonthlyLimit,
+        geocodingLimitExpiresAt: tenants.geocodingLimitExpiresAt,
+      })
+      .from(tenants)
+      .where(eq(tenants.id, req.tenantId))
+      .limit(1)
+
+    const freeLimit = effectiveLimit(tenant ?? { geocodingMonthlyLimit: null, geocodingLimitExpiresAt: null })
+    const [usage, creditLots] = await Promise.all([
+      geocodingLogsRepository.monthlyUsage(req.tenantId),
+      geocodingCreditsRepository.listActive(req.tenantId),
+    ])
+
+    const now = new Date()
+    const resetsAt = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+
+    return reply.send({
+      freeUsed: Math.min(usage, freeLimit),
+      freeLimit,
+      resetsAt: resetsAt.toISOString(),
+      limitExpiresAt: tenant?.geocodingLimitExpiresAt?.toISOString() ?? null,
+      creditsTotal: creditLots.reduce((sum, l) => sum + l.remaining, 0),
+      creditLots: creditLots.map(l => ({ remaining: l.remaining, expiresAt: l.expiresAt.toISOString() })),
+    })
   })
 
   app.get('/geocoding-logs/partner/:partnerId', async (req, reply) => {

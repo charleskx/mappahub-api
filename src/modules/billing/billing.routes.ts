@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { authenticate } from '../../middlewares/authenticate'
 import { AppError } from '../../shared/errors'
-import { createCheckoutSchema } from './billing.schema'
+import { checkoutCreditsSchema, createCheckoutSchema } from './billing.schema'
 import { billingService } from './billing.service'
 
 export async function billingRoutes(app: FastifyInstance) {
@@ -35,6 +35,22 @@ export async function billingRoutes(app: FastifyInstance) {
     if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
 
     const result = await billingService.createCheckoutSession(req.tenantId, body.data)
+    return reply.status(201).send(result)
+  })
+
+  app.get('/credit-packs', { preHandler: [authenticate] }, async () => {
+    return billingService.listCreditPacks()
+  })
+
+  app.post('/checkout-credits', { preHandler: [authenticate] }, async (req, reply) => {
+    if (req.userRole !== 'owner' && req.userRole !== 'super_admin') {
+      throw new AppError('FORBIDDEN', 403, 'Apenas o owner pode comprar créditos')
+    }
+
+    const body = checkoutCreditsSchema.safeParse(req.body)
+    if (!body.success) throw new AppError('VALIDATION_ERROR', 400, body.error.errors[0].message)
+
+    const result = await billingService.createCreditsCheckoutSession(req.tenantId, body.data)
     return reply.status(201).send(result)
   })
 

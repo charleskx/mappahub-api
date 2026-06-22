@@ -6,7 +6,7 @@ export type CreateGeocodingLog = {
   partnerId: string
   tenantId: string
   address: string
-  status: 'success' | 'no_results' | 'failed'
+  status: 'success' | 'no_results' | 'failed' | 'quota_exceeded'
   errorReason?: string | null
   lat?: number | null
   lng?: number | null
@@ -29,6 +29,19 @@ export const geocodingLogsRepository = {
       })
       .returning()
     return log
+  },
+
+  /** Geocodings consumidos no mês-calendário corrente (exclui bloqueios por limite). */
+  async monthlyUsage(tenantId: string): Promise<number> {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(geocodingLogs)
+      .where(and(
+        eq(geocodingLogs.tenantId, tenantId),
+        sql`${geocodingLogs.status} != 'quota_exceeded'`,
+        sql`${geocodingLogs.attemptedAt} >= date_trunc('month', now())`,
+      ))
+    return row?.count ?? 0
   },
 
   /** Logs for a single partner — most recent first, scoped to the tenant */

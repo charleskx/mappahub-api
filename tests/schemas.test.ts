@@ -7,7 +7,7 @@ import {
   resetPasswordSchema,
   totpLoginSchema,
 } from '../src/modules/auth/auth.schema'
-import { createCheckoutSchema } from '../src/modules/billing/billing.schema'
+import { checkoutCreditsSchema, createCheckoutSchema } from '../src/modules/billing/billing.schema'
 import { exportSchema } from '../src/modules/export/export.schema'
 import {
   createMapSchema,
@@ -74,6 +74,8 @@ describe('domain schemas', () => {
     expect(createPinTypeSchema.parse({ name: 'VIP', color: '#ff0000' }).name).toBe('VIP')
     expect(updatePinTypeSchema.parse({ color: '#00ff00' }).color).toBe('#00ff00')
     expect(createCheckoutSchema.parse({ plan: 'annual' }).plan).toBe('annual')
+    expect(checkoutCreditsSchema.parse({ packId: '5k' }).packId).toBe('5k')
+    expect(checkoutCreditsSchema.safeParse({ packId: '3k' }).success).toBe(false)
     expect(exportSchema.parse({ columns: ['name'] }).format).toBe('xlsx')
   })
 })
