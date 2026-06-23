@@ -29,6 +29,13 @@ vi.mock('../src/modules/geocoding/geocoding-logs.repository', () => ({
   },
 }))
 
+vi.mock('../src/modules/billing/payments.repository', () => ({
+  paymentsRepository: {
+    record: vi.fn(),
+    listByTenant: vi.fn(),
+  },
+}))
+
 vi.mock('../src/modules/pin-type/pin-type.repository', () => ({
   pinTypeRepository: {
     findAll: vi.fn(),
@@ -181,6 +188,7 @@ import { geocodingCreditsRepository } from '../src/modules/geocoding/geocoding-c
 import { geocodingLogsRepository } from '../src/modules/geocoding/geocoding-logs.repository'
 import { billingRepository } from '../src/modules/billing/billing.repository'
 import { billingService } from '../src/modules/billing/billing.service'
+import { paymentsRepository } from '../src/modules/billing/payments.repository'
 import { dashboardRepository } from '../src/modules/dashboard/dashboard.repository'
 import { dashboardService } from '../src/modules/dashboard/dashboard.service'
 import { exportService } from '../src/modules/export/export.service'
@@ -608,6 +616,69 @@ describe('billingService', () => {
 
     vi.mocked(billingRepository.findExpiringTrials).mockResolvedValue([{ ownerEmail: 'o@e.com', tenantName: 'Acme' }] as never)
     await expect(billingService.checkExpiringTrials(3)).resolves.toBe(1)
+  })
+
+  it('records a payment when a credit pack is purchased', async () => {
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValue({
+      id: 'evt_credit', type: 'checkout.session.completed',
+      data: { object: { id: 'cs_1', mode: 'payment', amount_total: 11900, currency: 'brl', metadata: { tenantId: 't1', packId: '5k' } } },
+    } as never)
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+    expect(paymentsRepository.record).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: 't1', eventId: 'evt_credit', type: 'credit_pack', amountCents: 11900, status: 'paid',
+    }))
+  })
+
+  it('records a payment on subscription checkout and on renewals/failures', async () => {
+    // 1ª cobrança (checkout de assinatura)
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValueOnce({
+      id: 'evt_sub', type: 'checkout.session.completed',
+      data: { object: { metadata: { tenantId: 't1' }, subscription: 'sub_1', amount_total: 19790, currency: 'brl' } },
+    } as never)
+    vi.mocked(stripe.subscriptions.retrieve).mockResolvedValue({
+      items: { data: [{ price: { id: 'price_monthly' } }] }, current_period_start: 100, current_period_end: 200,
+    } as never)
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+    expect(paymentsRepository.record).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: 'evt_sub', type: 'subscription', amountCents: 19790, status: 'paid',
+    }))
+
+    // Renovação (invoice.paid)
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValueOnce({
+      id: 'evt_renew', type: 'invoice.paid',
+      data: { object: { customer: 'cus_1', amount_paid: 19790, currency: 'brl', billing_reason: 'subscription_cycle' } },
+    } as never)
+    vi.mocked(billingRepository.findTenantByStripeCustomerId).mockResolvedValue({ tenantId: 't1' } as never)
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+    expect(paymentsRepository.record).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: 'evt_renew', description: 'Renovação da assinatura', status: 'paid',
+    }))
+
+    // Falha de cobrança (invoice.payment_failed)
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValueOnce({
+      id: 'evt_fail', type: 'invoice.payment_failed',
+      data: { object: { customer: 'cus_1', amount_due: 19790, currency: 'brl' } },
+    } as never)
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+    expect(billingRepository.updateSubscription).toHaveBeenCalledWith('t1', { status: 'past_due' })
+    expect(paymentsRepository.record).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: 'evt_fail', status: 'failed',
+    }))
+  })
+
+  it('does not double-record the first invoice of a new subscription', async () => {
+    vi.mocked(stripe.webhooks.constructEvent).mockReturnValue({
+      id: 'evt_first', type: 'invoice.paid',
+      data: { object: { customer: 'cus_1', amount_paid: 19790, billing_reason: 'subscription_create' } },
+    } as never)
+    await billingService.handleWebhookEvent(Buffer.from('{}'), 'sig')
+    expect(paymentsRepository.record).not.toHaveBeenCalled()
+  })
+
+  it('lists payment history for the tenant', async () => {
+    vi.mocked(paymentsRepository.listByTenant).mockResolvedValue([{ id: 'p1' }] as never)
+    await expect(billingService.listPayments('t1')).resolves.toEqual([{ id: 'p1' }])
+    expect(paymentsRepository.listByTenant).toHaveBeenCalledWith('t1')
   })
 })
 

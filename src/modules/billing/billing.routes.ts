@@ -38,6 +38,10 @@ export async function billingRoutes(app: FastifyInstance) {
     return reply.status(201).send(result)
   })
 
+  app.get('/payments', { preHandler: [authenticate] }, async req => {
+    return billingService.listPayments(req.tenantId)
+  })
+
   app.get('/credit-packs', { preHandler: [authenticate] }, async () => {
     return billingService.listCreditPacks()
   })

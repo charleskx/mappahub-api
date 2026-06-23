@@ -32,13 +32,15 @@ export async function notificationsRoutes(app: FastifyInstance) {
 
     reply.raw.write(': connected\n\n')
 
+    // Heartbeat a cada 15s mantém a conexão "ativa" para proxies/CDN (ex.: Cloudflare,
+    // que encerra com 524 conexões sem dados por ~100s). Margem folgada contra o timeout.
     const heartbeat = setInterval(() => {
       try {
         reply.raw.write(': heartbeat\n\n')
       } catch {
         clearInterval(heartbeat)
       }
-    }, 30_000)
+    }, 15_000)
 
     const unsubscribe = onTenantEvent(tenantId, event => {
       send(event.type, event)

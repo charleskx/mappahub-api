@@ -6,6 +6,7 @@ import { sendMail, trialExpiringHtml } from '../../shared/mailer'
 import { geocodingCreditsRepository } from '../geocoding/geocoding-credits.repository'
 import { findPack, GEO_PACKS } from '../geocoding/geocoding.limits'
 import { billingRepository } from './billing.repository'
+import { paymentsRepository } from './payments.repository'
 import type { CheckoutCreditsInput, CreateCheckoutInput } from './billing.schema'
 
 const PRICE_MAP: Record<string, string | undefined> = {
@@ -55,6 +56,11 @@ export const billingService = {
     })
 
     return { url: session.url }
+  },
+
+  // Histórico de pagamentos do tenant (registrado localmente via webhooks)
+  listPayments(tenantId: string) {
+    return paymentsRepository.listByTenant(tenantId)
   },
 
   // Catálogo de pacotes de créditos extras de geocoding (para exibição no front)
@@ -123,11 +129,21 @@ export const billingService = {
           const pack = findPack(session.metadata.packId)
           if (!pack) break
           const expiresAt = new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000)
+          const amountCents = session.amount_total ?? pack.priceCents
           await geocodingCreditsRepository.grantPack(tenantId, {
             quantity: pack.credits,
             expiresAt,
             stripeSessionId: session.id,
-            amountCents: session.amount_total ?? pack.priceCents,
+            amountCents,
+          })
+          await paymentsRepository.record({
+            tenantId,
+            eventId: event.id,
+            type: 'credit_pack',
+            description: `Pacote de ${pack.credits.toLocaleString('pt-BR')} geocodings`,
+            amountCents,
+            currency: session.currency ?? 'brl',
+            status: 'paid',
           })
           break
         }
@@ -144,6 +160,15 @@ export const billingService = {
           planType,
           currentPeriodStart: new Date(stripeSub.current_period_start * 1000),
           currentPeriodEnd: new Date(stripeSub.current_period_end * 1000),
+        })
+        await paymentsRepository.record({
+          tenantId,
+          eventId: event.id,
+          type: 'subscription',
+          description: `Assinatura ${planType === 'annual' ? 'anual' : 'mensal'}`,
+          amountCents: session.amount_total ?? 0,
+          currency: session.currency ?? 'brl',
+          status: 'paid',
         })
         break
       }
@@ -182,6 +207,27 @@ export const billingService = {
         break
       }
 
+      case 'invoice.paid': {
+        const invoice = event.data.object as Stripe.Invoice
+        // A 1ª fatura já é registrada via checkout.session.completed — aqui pegamos as renovações
+        if (invoice.billing_reason === 'subscription_create') break
+        const tenantRow = await billingRepository.findTenantByStripeCustomerId(
+          String(invoice.customer),
+        )
+        if (!tenantRow) break
+
+        await paymentsRepository.record({
+          tenantId: tenantRow.tenantId,
+          eventId: event.id,
+          type: 'subscription',
+          description: 'Renovação da assinatura',
+          amountCents: invoice.amount_paid,
+          currency: invoice.currency ?? 'brl',
+          status: 'paid',
+        })
+        break
+      }
+
       case 'invoice.payment_failed': {
         const invoice = event.data.object as Stripe.Invoice
         const tenantRow = await billingRepository.findTenantByStripeCustomerId(
@@ -190,6 +236,15 @@ export const billingService = {
         if (!tenantRow) break
 
         await billingRepository.updateSubscription(tenantRow.tenantId, { status: 'past_due' })
+        await paymentsRepository.record({
+          tenantId: tenantRow.tenantId,
+          eventId: event.id,
+          type: 'subscription',
+          description: 'Falha na cobrança da assinatura',
+          amountCents: invoice.amount_due ?? 0,
+          currency: invoice.currency ?? 'brl',
+          status: 'failed',
+        })
         break
       }
     }

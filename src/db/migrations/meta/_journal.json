@@ -50,6 +50,13 @@
       "when": 1782163907364,
       "tag": "0006_simple_prima",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1782172864442,
+      "tag": "0007_short_the_executioner",
+      "breakpoints": true
     }
   ]
 }
